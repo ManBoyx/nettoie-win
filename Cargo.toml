@@ -1,0 +1,44 @@
+[package]
+name = "nettoie-win"
+version = "0.1.0"
+edition = "2021"
+description = "Retire les applis préinstallées, les pubs et la télémétrie de Windows 10"
+
+[lib]
+name = "nettoie_win"
+path = "src/lib.rs"
+
+[[bin]]
+name = "Nettoie-Win"
+path = "src/main.rs"
+required-features = ["fenetre"]
+
+[features]
+default = ["fenetre"]
+# La fenêtre. Sans elle (`--no-default-features`), seule la logique est compilée : les tests vont vite.
+fenetre = ["dep:eframe"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+eframe = { version = "0.36", optional = true, default-features = false, features = ["accesskit", "default_fonts", "wgpu", "x11"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+opt-level = "s"
+strip = true
+panic = "abort"
+
+[dev-dependencies]
+# Pilote la fenêtre sans écran et en tire des images, pour les tests.
+egui_kittest = { version = "0.36", features = ["wgpu", "snapshot"] }
+egui = "0.36"
