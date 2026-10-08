@@ -6,13 +6,17 @@ use std::time::Duration;
 use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::Harness;
 use nettoie_win::faux::FauxSysteme;
-use nettoie_win::interface::Fenetre;
+use nettoie_win::interface::{Fenetre, Profil};
 use nettoie_win::journal::Journal;
 
 type Banc = Harness<'static, Fenetre>;
 
 fn fenetre(sys: FauxSysteme) -> Banc {
-    let fenetre = Fenetre::nouvelle(Box::new(sys), Journal::en_memoire(), Box::new(|| {}), true);
+    fenetre_de(sys, Profil::WINDOWS.en_demonstration())
+}
+
+fn fenetre_de(sys: FauxSysteme, profil: Profil) -> Banc {
+    let fenetre = Fenetre::nouvelle(Box::new(sys), Journal::en_memoire(), Box::new(|| {}), profil);
     let mut banc = Harness::builder()
         .with_size(egui::vec2(900.0, 680.0))
         .build_ui_state(|ui, fenetre: &mut Fenetre| fenetre.afficher(ui), fenetre);
@@ -91,6 +95,79 @@ fn chaque_onglet_montre_sa_propre_liste() {
 
     assert!(visible(&banc, "Suggestions dans le menu Démarrer"));
     assert!(!visible(&banc, "Services de télémétrie"));
+}
+
+#[test]
+fn sous_windows_11_la_liste_est_celle_de_windows_11() {
+    let mut banc = fenetre(FauxSysteme::windows_11_typique());
+    assert!(contient(&banc, "Windows 11"));
+    assert!(visible(&banc, "Chat Teams (version personnelle)"));
+    assert!(coche(&banc, "Chat Teams (version personnelle)"));
+    assert!(!coche(&banc, "Copilot"));
+
+    banc.get_by_label_contains("Pubs et suggestions (").click();
+    repos(&mut banc);
+
+    assert!(visible(&banc, "Widgets de la barre des tâches"));
+    assert!(!contient(&banc, "Actualités et champs d'intérêt"));
+}
+
+#[test]
+fn sous_windows_10_rien_de_windows_11_n_apparait() {
+    let mut banc = fenetre(FauxSysteme::windows_10_typique());
+    assert!(contient(&banc, "Windows 10"));
+
+    banc.get_by_label_contains("Pubs et suggestions (").click();
+    repos(&mut banc);
+
+    assert!(!visible(&banc, "Widgets de la barre des tâches"));
+    assert!(contient(&banc, "Actualités et champs d'intérêt"));
+}
+
+#[test]
+fn sous_linux_la_fenetre_montre_le_catalogue_linux() {
+    let banc = fenetre_de(FauxSysteme::ubuntu_typique(), Profil::LINUX);
+    assert!(contient(&banc, "Nettoie-Linux"));
+    assert!(contient(&banc, "Ubuntu 24.04"));
+    assert!(coche(&banc, "Jeux de GNOME"));
+    assert!(!coche(&banc, "Thunderbird"));
+    assert!(!visible(&banc, "Jeux de KDE"), "absent de ce PC, donc non proposé");
+    assert!(!contient(&banc, "Démonstration"));
+}
+
+#[test]
+fn sous_linux_la_confirmation_ne_parle_ni_de_windows_ni_de_point_de_restauration() {
+    let mut banc = fenetre_de(FauxSysteme::ubuntu_typique(), Profil::LINUX);
+
+    clic(&mut banc, "Appliquer");
+
+    assert!(contient(&banc, "gestionnaire de paquets"));
+    assert!(contient(&banc, "simulé"));
+    assert!(contient(&banc, "Rapport d'installation d'Ubuntu"), "un paquet retiré hors de l'onglet Applis doit être annoncé");
+    assert!(!contient(&banc, "Microsoft Store"));
+    assert!(!contient(&banc, "point de restauration"));
+
+    clic(&mut banc, "Confirmer");
+
+    assert!(contient(&banc, "Redémarrez"));
+    assert!(!contient(&banc, "point de restauration"));
+    clic(&mut banc, "Fermer");
+    assert!(!visible(&banc, "Jeux de GNOME"));
+    assert!(visible(&banc, "Thunderbird"));
+}
+
+#[test]
+fn sous_linux_annuler_rappelle_comment_remettre_les_paquets() {
+    let mut banc = fenetre_de(FauxSysteme::ubuntu_typique(), Profil::LINUX);
+    clic(&mut banc, "Appliquer");
+    clic(&mut banc, "Confirmer");
+    clic(&mut banc, "Fermer");
+
+    clic(&mut banc, "Annuler les changements");
+    clic(&mut banc, "Remettre comme avant");
+
+    assert!(contient(&banc, "aisleriot"));
+    assert!(contient(&banc, "gestionnaire de paquets"));
 }
 
 #[test]
@@ -238,12 +315,26 @@ fn annuler_les_changements_remet_les_reglages_et_liste_les_applis_a_reinstaller(
 fn captures() {
     let dossier = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("captures");
     std::fs::create_dir_all(&dossier).unwrap();
+    for (sys, profil, nom) in [
+        (FauxSysteme::ubuntu_typique(), Profil::LINUX, "6-linux"),
+        (FauxSysteme::windows_11_typique(), Profil::WINDOWS.en_demonstration(), "7-windows-11"),
+    ] {
+        let fenetre = Fenetre::nouvelle(Box::new(sys), Journal::en_memoire(), Box::new(|| {}), profil);
+        let mut banc = Harness::builder()
+            .with_size(egui::vec2(900.0, 680.0))
+            .wgpu()
+            .build_ui_state(|ui, fenetre: &mut Fenetre| fenetre.afficher(ui), fenetre);
+        repos(&mut banc);
+        banc.render().unwrap().save(dossier.join(format!("{nom}.png"))).unwrap();
+        clic(&mut banc, "Appliquer");
+        banc.render().unwrap().save(dossier.join(format!("{nom}-confirmation.png"))).unwrap();
+    }
     for (theme, suffixe) in [(egui::Theme::Light, "clair"), (egui::Theme::Dark, "sombre")] {
         let fenetre = Fenetre::nouvelle(
             Box::new(FauxSysteme::windows_10_typique()),
             Journal::en_memoire(),
             Box::new(|| {}),
-            true,
+            Profil::WINDOWS.en_demonstration(),
         );
         let mut banc = Harness::builder()
             .with_size(egui::vec2(900.0, 680.0))

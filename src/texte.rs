@@ -23,6 +23,12 @@ pub fn decoder_sortie(octets: &[u8]) -> String {
     String::from_utf8_lossy(octets).into_owned()
 }
 
+/// Lit le numéro de version de Windows tel que le registre le range (texte en UTF-16).
+pub fn build_depuis_registre(octets: &[u8]) -> Option<u32> {
+    let unites: Vec<u16> = octets.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    String::from_utf16_lossy(&unites).trim_matches('\0').trim().parse().ok()
+}
+
 /// Lit la définition XML d'une tâche planifiée et dit si elle est active.
 pub fn tache_active_depuis_xml(xml: &str) -> bool {
     // Seul le <Enabled> du bloc <Settings> concerne la tâche ; les déclencheurs ont le leur.
@@ -168,6 +174,22 @@ mod tests {
     #[test]
     fn des_octets_invalides_ne_font_pas_echouer_la_lecture() {
         assert!(decoder_sortie(&[b'o', b'k', 0xE9]).starts_with("ok"));
+    }
+
+    fn utf16(texte: &str) -> Vec<u8> {
+        texte.encode_utf16().flat_map(|u| u.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn le_numero_de_version_de_windows_est_lu_dans_le_registre() {
+        assert_eq!(build_depuis_registre(&utf16("19045\0")), Some(19045));
+        assert_eq!(build_depuis_registre(&utf16("22631")), Some(22631));
+    }
+
+    #[test]
+    fn un_numero_de_version_illisible_est_ignore() {
+        assert_eq!(build_depuis_registre(&utf16("inconnu\0")), None);
+        assert_eq!(build_depuis_registre(&[]), None);
     }
 
     const TACHE: &str = "<Task><Triggers><TimeTrigger><Enabled>true</Enabled></TimeTrigger></Triggers>\

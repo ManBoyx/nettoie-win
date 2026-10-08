@@ -2,14 +2,14 @@
 
 use crate::catalogue::{est_protege, Action, Element, Ruche};
 use crate::motif::correspond;
-use crate::systeme::{Systeme, DEMARRAGE_DESACTIVE};
+use crate::systeme::{Systeme, ValeurBrute, DEMARRAGE_DESACTIVE};
 
 /// Une opération précise à faire sur ce PC.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Travail {
     /// Retirer l'appli qui porte exactement ce nom.
     Paquet(String),
-    Registre { ruche: Ruche, cle: String, nom: String, valeur: u32 },
+    Registre { ruche: Ruche, cle: String, nom: String, valeur: ValeurBrute },
     Service(String),
     Tache(String),
     OneDrive,
@@ -21,11 +21,14 @@ impl Travail {
         match self {
             Travail::Paquet(nom) => format!("Retirer l'appli {nom}"),
             Travail::Registre { ruche, cle, nom, valeur } => {
-                let racine = match ruche {
-                    Ruche::Utilisateur => "HKCU",
-                    Ruche::Machine => "HKLM",
-                };
-                format!(r"Régler {racine}\{cle}\{nom} sur {valeur}")
+                let valeur = valeur.lisible();
+                match ruche {
+                    Ruche::Utilisateur => format!(r"Régler HKCU\{cle}\{nom} sur {valeur}"),
+                    Ruche::Machine => format!(r"Régler HKLM\{cle}\{nom} sur {valeur}"),
+                    Ruche::Fichier => format!("Mettre {nom}={valeur} dans {cle}"),
+                    Ruche::Gsettings => format!("Régler {cle} {nom} sur {valeur}"),
+                    Ruche::Pro => format!("Régler {nom} sur {valeur} dans Ubuntu Pro"),
+                }
             }
             Travail::Service(nom) => format!("Désactiver le service {nom}"),
             Travail::Tache(chemin) => format!("Désactiver la tâche planifiée {chemin}"),
@@ -46,17 +49,24 @@ pub struct Analyse<'a> {
     pub lignes: Vec<Ligne<'a>>,
     /// Éléments déjà réglés ou absents de ce PC.
     pub masques: usize,
+    /// Numéro de version de Windows, si c'en est un.
+    pub build: Option<u32>,
+    /// Nom du système, pour l'affichage.
+    pub systeme: Option<String>,
     pub avertissements: Vec<String>,
 }
 
 pub fn analyser<'a>(sys: &dyn Systeme, catalogue: &'a [Element]) -> Analyse<'a> {
-    let mut analyse = Analyse::default();
+    let mut analyse = Analyse { build: sys.build_windows(), systeme: sys.description(), ..Default::default() };
     let paquets = sys.paquets().unwrap_or_else(|e| {
         analyse.avertissements.push(format!("Liste des applis illisible : {e}"));
         Vec::new()
     });
 
     for element in catalogue {
+        if !element.cible.convient(analyse.build) {
+            continue;
+        }
         let mut travaux = Vec::new();
         let mut retire_une_appli = false;
         let mut appli_presente = false;
@@ -83,10 +93,12 @@ pub fn analyser<'a>(sys: &dyn Systeme, catalogue: &'a [Element]) -> Analyse<'a> 
                         Err(e) => analyse.avertissements.push(format!("OneDrive : {e}")),
                     }
                 }
+                Action::Registre { ruche, cle, nom, .. } if !sys.reglage_applicable(ruche, cle, nom) => {}
                 Action::Registre { ruche, cle, nom, valeur } => match sys.lire_valeur(ruche, cle, nom) {
                     Ok(actuelle) => {
-                        if actuelle.and_then(|v| v.en_dword()) != Some(valeur) {
-                            travaux.push(Travail::Registre { ruche, cle: cle.into(), nom: nom.into(), valeur });
+                        let voulue = ValeurBrute::from(valeur);
+                        if actuelle.as_ref() != Some(&voulue) {
+                            travaux.push(Travail::Registre { ruche, cle: cle.into(), nom: nom.into(), valeur: voulue });
                         }
                     }
                     Err(e) => analyse.avertissements.push(format!("{} : {e}", element.nom)),
@@ -118,7 +130,7 @@ pub fn analyser<'a>(sys: &dyn Systeme, catalogue: &'a [Element]) -> Analyse<'a> 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::catalogue::{Categorie, Risque};
+    use crate::catalogue::{Categorie, Cible, Risque};
     use crate::faux::FauxSysteme;
     use crate::systeme::*;
 
@@ -131,11 +143,13 @@ pub(crate) mod tests {
             nom: "Essai",
             explication: "Élément d'essai.",
             risque: Risque::SansRisque,
+            cible: Cible::Partout,
             actions,
         }
     }
 
-    const REGLAGE: Action = Action::Registre { ruche: Ruche::Utilisateur, cle: CLE, nom: "A", valeur: 0 };
+    const REGLAGE: Action =
+        Action::Registre { ruche: Ruche::Utilisateur, cle: CLE, nom: "A", valeur: Valeur::Nombre(0) };
 
     fn travaux(sys: &FauxSysteme, actions: &'static [Action]) -> Vec<Travail> {
         let catalogue = [element(actions)];
@@ -203,7 +217,7 @@ pub(crate) mod tests {
             ruche: Ruche::Utilisateur,
             cle: CLE.into(),
             nom: "A".into(),
-            valeur: 0,
+            valeur: ValeurBrute::dword(0),
         }];
         let mut sys = FauxSysteme::vide();
         assert_eq!(travaux(&sys, &[REGLAGE]), attendu);
@@ -281,8 +295,83 @@ pub(crate) mod tests {
 
     #[test]
     fn la_description_d_un_reglage_donne_son_emplacement_complet() {
-        let travail = Travail::Registre { ruche: Ruche::Machine, cle: CLE.into(), nom: "A".into(), valeur: 1 };
+        let travail =
+            Travail::Registre { ruche: Ruche::Machine, cle: CLE.into(), nom: "A".into(), valeur: ValeurBrute::dword(1) };
         assert_eq!(travail.decrire(), r"Régler HKLM\Software\Essai\A sur 1");
+    }
+
+    fn lignes_selon_la_version(cible: Cible, build: Option<u32>) -> usize {
+        let mut sys = FauxSysteme::vide();
+        sys.build = build;
+        let catalogue = [element(&[REGLAGE]).seulement(cible)];
+        analyser(&sys, &catalogue).lignes.len()
+    }
+
+    #[test]
+    fn un_element_propre_a_windows_11_n_est_pas_propose_sous_windows_10() {
+        assert_eq!(lignes_selon_la_version(Cible::Windows11, Some(19045)), 0);
+        assert_eq!(lignes_selon_la_version(Cible::Windows11, Some(22631)), 1);
+    }
+
+    #[test]
+    fn un_element_propre_a_windows_10_n_est_pas_propose_sous_windows_11() {
+        assert_eq!(lignes_selon_la_version(Cible::Windows10, Some(22631)), 0);
+        assert_eq!(lignes_selon_la_version(Cible::Windows10, Some(19045)), 1);
+    }
+
+    #[test]
+    fn l_analyse_rapporte_la_version_de_windows() {
+        let mut sys = FauxSysteme::vide();
+        sys.build = Some(22631);
+        assert_eq!(analyser(&sys, &[]).build, Some(22631));
+    }
+
+    const REGLAGE_FICHIER: Action = Action::Registre {
+        ruche: Ruche::Fichier,
+        cle: "/etc/default/essai",
+        nom: "ENABLED",
+        valeur: Valeur::Texte("0"),
+    };
+
+    #[test]
+    fn un_reglage_de_fichier_est_compare_comme_du_texte() {
+        let mut sys = FauxSysteme::vide();
+        sys.ecrire_valeur(Ruche::Fichier, "/etc/default/essai", "ENABLED", &ValeurBrute::texte("1")).unwrap();
+        assert_eq!(travaux(&sys, &[REGLAGE_FICHIER]).len(), 1);
+        sys.ecrire_valeur(Ruche::Fichier, "/etc/default/essai", "ENABLED", &ValeurBrute::texte("0")).unwrap();
+        assert!(travaux(&sys, &[REGLAGE_FICHIER]).is_empty());
+    }
+
+    #[test]
+    fn un_reglage_dont_le_fichier_n_existe_pas_n_est_pas_propose() {
+        let mut sys = FauxSysteme::vide();
+        sys.inapplicables.insert("/etc/default/essai".into());
+        assert!(travaux(&sys, &[REGLAGE_FICHIER]).is_empty());
+    }
+
+    #[test]
+    fn les_reglages_linux_sont_decrits_sans_jargon_de_windows() {
+        let fichier = Travail::Registre {
+            ruche: Ruche::Fichier,
+            cle: "/etc/default/essai".into(),
+            nom: "ENABLED".into(),
+            valeur: ValeurBrute::texte("0"),
+        };
+        assert_eq!(fichier.decrire(), "Mettre ENABLED=0 dans /etc/default/essai");
+        let bureau = Travail::Registre {
+            ruche: Ruche::Gsettings,
+            cle: "org.gnome.desktop.privacy".into(),
+            nom: "report-technical-problems".into(),
+            valeur: ValeurBrute::texte("false"),
+        };
+        assert_eq!(bureau.decrire(), "Régler org.gnome.desktop.privacy report-technical-problems sur false");
+        let pro = Travail::Registre {
+            ruche: Ruche::Pro,
+            cle: "config".into(),
+            nom: "apt_news".into(),
+            valeur: ValeurBrute::texte("False"),
+        };
+        assert_eq!(pro.decrire(), "Régler apt_news sur False dans Ubuntu Pro");
     }
 
     #[test]

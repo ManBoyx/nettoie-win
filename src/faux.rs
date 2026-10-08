@@ -20,6 +20,12 @@ pub struct FauxSysteme {
     pub en_panne: BTreeSet<String>,
     /// Si vrai, la liste des applis ne peut pas être lue.
     pub paquets_illisibles: bool,
+    /// Numéro de version de Windows ; `None` pour un PC sous Linux.
+    pub build: Option<u32>,
+    /// Clés (fichiers, schémas) qui n'existent pas sur ce PC.
+    pub inapplicables: BTreeSet<String>,
+    /// Nom de la distribution, pour un PC sous Linux.
+    pub distribution: Option<String>,
 }
 
 /// `Ruche` ordonnable, pour servir de clé.
@@ -29,6 +35,9 @@ fn code(ruche: Ruche) -> Ruche2 {
     match ruche {
         Ruche::Utilisateur => 0,
         Ruche::Machine => 1,
+        Ruche::Fichier => 2,
+        Ruche::Gsettings => 3,
+        Ruche::Pro => 4,
     }
 }
 
@@ -50,6 +59,9 @@ impl Default for FauxSysteme {
             points_crees: 0,
             en_panne: BTreeSet::new(),
             paquets_illisibles: false,
+            build: Some(19045),
+            inapplicables: BTreeSet::new(),
+            distribution: None,
         }
     }
 }
@@ -141,6 +153,84 @@ impl FauxSysteme {
         sys
     }
 
+    /// Un Windows 11 du commerce : comme Windows 10, avec ses propres applis en plus.
+    pub fn windows_11_typique() -> Self {
+        let mut sys = Self::windows_10_typique();
+        sys.build = Some(22631);
+        sys.paquets.retain(|p| {
+            !["Microsoft.Microsoft3DViewer", "Microsoft.MixedReality.Portal", "Microsoft.SkypeApp", "Microsoft.MSPaint"]
+                .contains(&p.as_str())
+        });
+        for nom in [
+            "MicrosoftTeams",
+            "MSTeams",
+            "Clipchamp.Clipchamp",
+            "Microsoft.Copilot",
+            "Microsoft.Todos",
+            "Microsoft.PowerAutomateDesktop",
+            "MicrosoftCorporationII.MicrosoftFamily",
+            "MicrosoftCorporationII.QuickAssist",
+            "Microsoft.OutlookForWindows",
+            "Microsoft.Windows.DevHome",
+            "Microsoft.BingNews",
+            "Microsoft.GamingApp",
+            "Microsoft.Paint",
+            "Microsoft.WindowsNotepad",
+            "Microsoft.WindowsTerminal",
+            "MicrosoftWindows.Client.WebExperience",
+            "Microsoft.Windows.Ai.Copilot.Provider",
+        ] {
+            sys.paquets.push(nom.to_string());
+        }
+        sys
+    }
+
+    /// Un Ubuntu de bureau fraîchement installé.
+    pub fn ubuntu_typique() -> Self {
+        let mut sys = Self::default();
+        sys.build = None;
+        sys.distribution = Some("Ubuntu 24.04.1 LTS".to_string());
+        sys.paquets = [
+            "aisleriot",
+            "gnome-mahjongg",
+            "gnome-mines",
+            "gnome-sudoku",
+            "thunderbird",
+            "rhythmbox",
+            "cheese",
+            "shotwell",
+            "transmission-gtk",
+            "remmina",
+            "ubuntu-report",
+            "systemd",
+            "bash",
+            "sudo",
+            "ubuntu-desktop",
+            "gnome-shell",
+            "network-manager",
+            "firefox",
+            "libreoffice-writer",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        for service in ["apport.service", "whoopsie.service", "kerneloops.service"] {
+            sys.services.insert(service.into(), DEMARRAGE_AUTO);
+            sys.en_marche.insert(service.into());
+        }
+        sys.poser_texte(Ruche::Fichier, "/etc/default/motd-news", "ENABLED", "1");
+        sys.poser_texte(Ruche::Fichier, "/etc/default/apport", "enabled", "1");
+        sys.poser_texte(Ruche::Fichier, "/etc/popularity-contest.conf", "PARTICIPATE", "\"yes\"");
+        sys.poser_texte(Ruche::Pro, "config", "apt_news", "True");
+        sys.poser_texte(Ruche::Gsettings, "org.gnome.desktop.privacy", "report-technical-problems", "true");
+        sys.poser_texte(Ruche::Gsettings, "org.gnome.desktop.privacy", "send-software-usage-stats", "false");
+        sys
+    }
+
+    pub fn poser_texte(&mut self, ruche: Ruche, cle: &str, nom: &str, valeur: &str) {
+        self.registre.insert(cle_registre(ruche, cle, nom), ValeurBrute::texte(valeur));
+    }
+
     pub fn poser(&mut self, ruche: Ruche, cle: &str, nom: &str, valeur: u32) {
         self.registre.insert(cle_registre(ruche, cle, nom), ValeurBrute::dword(valeur));
     }
@@ -159,6 +249,18 @@ impl FauxSysteme {
 }
 
 impl Systeme for FauxSysteme {
+    fn build_windows(&self) -> Option<u32> {
+        self.build
+    }
+
+    fn description(&self) -> Option<String> {
+        self.distribution.clone().or_else(|| self.build.map(nom_windows))
+    }
+
+    fn reglage_applicable(&self, _ruche: Ruche, cle: &str, _nom: &str) -> bool {
+        !self.inapplicables.contains(cle)
+    }
+
     fn lire_valeur(&self, ruche: Ruche, cle: &str, nom: &str) -> Result<Option<ValeurBrute>, String> {
         Ok(self.registre.get(&cle_registre(ruche, cle, nom)).cloned())
     }

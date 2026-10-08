@@ -191,8 +191,8 @@ pub(crate) mod tests {
     /// Catalogue qui connaît tout ce que ces tests remettent.
     fn essai() -> [Element; 1] {
         [crate::analyse::tests::element(&[
-            Action::Registre { ruche: Ruche::Utilisateur, cle: CLE, nom: "A", valeur: 0 },
-            Action::Registre { ruche: Ruche::Utilisateur, cle: CLE, nom: "B", valeur: 0 },
+            Action::Registre { ruche: Ruche::Utilisateur, cle: CLE, nom: "A", valeur: Valeur::Nombre(0) },
+            Action::Registre { ruche: Ruche::Utilisateur, cle: CLE, nom: "B", valeur: Valeur::Nombre(0) },
             Action::Service("DiagTrack"),
             Action::Service("dmwappushservice"),
             Action::Tache(r"\T"),

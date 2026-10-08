@@ -1,8 +1,8 @@
 [package]
 name = "nettoie-win"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Retire les applis préinstallées, les pubs et la télémétrie de Windows 10"
+description = "Retire les applis préinstallées, les pubs et la télémétrie de Windows 10, Windows 11 et Linux"
 
 [lib]
 name = "nettoie_win"

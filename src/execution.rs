@@ -3,7 +3,7 @@
 use crate::analyse::{Ligne, Travail};
 use crate::catalogue::est_protege;
 use crate::journal::{Entree, Journal};
-use crate::systeme::{Systeme, ValeurBrute, DEMARRAGE_DESACTIVE};
+use crate::systeme::{Systeme, DEMARRAGE_DESACTIVE};
 
 /// Ce qu'a donné un élément.
 #[derive(Clone, Debug, PartialEq)]
@@ -65,7 +65,7 @@ pub fn executer(sys: &mut dyn Systeme, journal: &mut Journal, travail: &Travail)
         Travail::Registre { ruche, cle, nom, valeur } => {
             let avant = sys.lire_valeur(*ruche, cle, nom)?;
             journal.ajouter(Entree::Registre { ruche: *ruche, cle: cle.clone(), nom: nom.clone(), avant })?;
-            sys.ecrire_valeur(*ruche, cle, nom, &ValeurBrute::dword(*valeur))
+            sys.ecrire_valeur(*ruche, cle, nom, valeur)
                 .map_err(|e| oublier(journal, e))
         }
         Travail::Service(nom) => {
@@ -107,7 +107,7 @@ mod tests {
     use crate::systeme::*;
 
     fn reglage(nom: &str, valeur: u32) -> Travail {
-        Travail::Registre { ruche: Ruche::Utilisateur, cle: CLE.into(), nom: nom.into(), valeur }
+        Travail::Registre { ruche: Ruche::Utilisateur, cle: CLE.into(), nom: nom.into(), valeur: ValeurBrute::dword(valeur) }
     }
 
     fn ligne<'a>(element: &'a Element, travaux: Vec<Travail>) -> Ligne<'a> {
@@ -292,6 +292,82 @@ mod tests {
 
         assert!(resultats.iter().all(|r| r.reussi()), "{resultats:?}");
         assert!(analyser(&sys, catalogue()).lignes.is_empty());
+    }
+
+    #[test]
+    fn sous_windows_11_le_catalogue_entier_s_applique_et_s_annule_aussi() {
+        let depart = FauxSysteme::windows_11_typique();
+        let mut sys = depart.clone();
+        let mut journal = Journal::en_memoire();
+        let analyse = analyser(&sys, catalogue());
+        let ids: Vec<&str> = analyse.lignes.iter().map(|l| l.element.id).collect();
+        for attendu in ["teams-chat", "copilot", "widgets", "recall", "dev-home"] {
+            assert!(ids.contains(&attendu), "{attendu} devrait être proposé sous Windows 11");
+        }
+        for absent in ["actualites-barre", "reunion-maintenant", "skype"] {
+            assert!(!ids.contains(&absent), "{absent} ne devrait pas être proposé sous Windows 11");
+        }
+
+        let resultats = appliquer(&mut sys, &mut journal, &analyse.lignes, &mut sans_suivi());
+
+        assert!(resultats.iter().all(|r| r.reussi()), "{resultats:?}");
+        assert!(analyser(&sys, catalogue()).lignes.is_empty());
+        for garde in ["MicrosoftWindows.Client.WebExperience", "Microsoft.Windows.Ai.Copilot.Provider", "Microsoft.Paint", "Microsoft.WindowsNotepad", "Microsoft.WindowsTerminal", "Microsoft.WindowsStore"] {
+            assert!(sys.paquets.iter().any(|p| p == garde), "{garde} a été retirée");
+        }
+        let bilan = annuler(&mut sys, &mut journal, catalogue());
+        assert!(bilan.echecs.is_empty());
+        assert_eq!(sys.registre, depart.registre);
+    }
+
+    #[test]
+    fn sous_ubuntu_le_catalogue_linux_s_applique_sans_toucher_au_systeme_et_s_annule() {
+        let linux = crate::catalogue_linux::catalogue();
+        let depart = FauxSysteme::ubuntu_typique();
+        let mut sys = depart.clone();
+        let mut journal = Journal::en_memoire();
+        let analyse = analyser(&sys, linux);
+        let ids: Vec<&str> = analyse.lignes.iter().map(|l| l.element.id).collect();
+        for attendu in ["jeux-gnome", "thunderbird", "annonces-ubuntu", "plantages-ubuntu", "statistiques-paquets", "rapport-ubuntu", "rapports-gnome"] {
+            assert!(ids.contains(&attendu), "{attendu} devrait être proposé sous Ubuntu");
+        }
+        for absent in ["jeux-kde", "plantages-fedora", "recensement-zorin", "hypnotix"] {
+            assert!(!ids.contains(&absent), "{absent} ne devrait pas être proposé sous Ubuntu");
+        }
+
+        let resultats = appliquer(&mut sys, &mut journal, &analyse.lignes, &mut sans_suivi());
+
+        assert!(resultats.iter().all(|r| r.reussi()), "{resultats:?}");
+        assert!(analyser(&sys, linux).lignes.is_empty());
+        for garde in ["systemd", "bash", "sudo", "ubuntu-desktop", "gnome-shell", "network-manager", "firefox", "libreoffice-writer"] {
+            assert!(sys.paquets.iter().any(|p| p == garde), "{garde} a été retiré");
+        }
+        let bilan = annuler(&mut sys, &mut journal, linux);
+        assert!(bilan.echecs.is_empty(), "{:?}", bilan.echecs);
+        assert_eq!(sys.registre, depart.registre);
+        assert_eq!(sys.services, depart.services);
+        assert_eq!(sys.en_marche, depart.en_marche);
+        assert!(bilan.a_reinstaller.contains(&"aisleriot".to_string()));
+    }
+
+    #[test]
+    fn le_catalogue_windows_ne_propose_rien_sur_un_pc_linux_et_inversement() {
+        let ubuntu = FauxSysteme::ubuntu_typique();
+        let lignes = analyser(&ubuntu, catalogue()).lignes;
+        assert!(lignes.iter().all(|l| l.travaux.iter().all(|t| !matches!(t, Travail::Paquet(_)))));
+        let windows = FauxSysteme::windows_10_typique();
+        assert!(analyser(&windows, crate::catalogue_linux::catalogue())
+            .lignes
+            .iter()
+            .all(|l| l.travaux.iter().all(|t| !matches!(t, Travail::Paquet(_)))));
+    }
+
+    #[test]
+    fn sous_windows_10_rien_de_propre_a_windows_11_n_est_propose() {
+        let analyse = analyser(&FauxSysteme::windows_10_typique(), catalogue());
+        for ligne in &analyse.lignes {
+            assert_ne!(ligne.element.cible, crate::catalogue::Cible::Windows11, "{}", ligne.element.id);
+        }
     }
 
     #[test]

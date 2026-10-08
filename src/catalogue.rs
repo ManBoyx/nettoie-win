@@ -19,22 +19,58 @@ pub enum Risque {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Ruche {
-    /// HKEY_CURRENT_USER
+    /// Windows : HKEY_CURRENT_USER
     Utilisateur,
-    /// HKEY_LOCAL_MACHINE
+    /// Windows : HKEY_LOCAL_MACHINE
     Machine,
+    /// Linux : ligne `NOM=valeur` d'un fichier de configuration ; la clé est le chemin du fichier.
+    Fichier,
+    /// Linux : réglage du bureau (gsettings), propre au compte ; la clé est le schéma.
+    Gsettings,
+    /// Ubuntu : réglage de l'outil `pro` (Ubuntu Pro).
+    Pro,
+}
+
+/// La valeur qu'un réglage doit prendre.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Valeur {
+    Nombre(u32),
+    Texte(&'static str),
+}
+
+/// Sur quels systèmes un élément a un sens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cible {
+    Partout,
+    Windows10,
+    Windows11,
+}
+
+/// Premier numéro de version (« build ») de Windows 11.
+pub const PREMIER_WINDOWS_11: u32 = 22000;
+
+impl Cible {
+    /// `build` : numéro de version de Windows, ou `None` hors de Windows.
+    pub fn convient(self, build: Option<u32>) -> bool {
+        match (self, build) {
+            (Cible::Partout, _) => true,
+            (Cible::Windows10, Some(b)) => b < PREMIER_WINDOWS_11,
+            (Cible::Windows11, Some(b)) => b >= PREMIER_WINDOWS_11,
+            (_, None) => false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     /// Retirer les applis dont le nom correspond au motif.
     Paquet(&'static str),
-    /// Mettre une valeur numérique dans le registre.
+    /// Mettre une valeur dans le registre (Windows) ou dans un réglage (Linux).
     Registre {
         ruche: Ruche,
         cle: &'static str,
         nom: &'static str,
-        valeur: u32,
+        valeur: Valeur,
     },
     /// Désactiver un service Windows.
     Service(&'static str),
@@ -51,10 +87,17 @@ pub struct Element {
     pub nom: &'static str,
     pub explication: &'static str,
     pub risque: Risque,
+    pub cible: Cible,
     pub actions: &'static [Action],
 }
 
 impl Element {
+    /// Restreint l'élément à une version de Windows.
+    pub const fn seulement(mut self, cible: Cible) -> Element {
+        self.cible = cible;
+        self
+    }
+
     pub fn coche_par_defaut(&self) -> bool {
         self.risque == Risque::SansRisque
     }
@@ -99,11 +142,58 @@ pub const PROTEGES: &[&str] = &[
     "AppUp.Intel*",
     "AdvancedMicroDevicesInc*",
     "DolbyLaboratories.*",
+    // ----- Linux : ce sans quoi le système ne démarre plus ou ne s'administre plus -----
+    "linux-image*",
+    "linux-generic*",
+    "linux-firmware*",
+    "linux",
+    "kernel*",
+    "firmware*",
+    "systemd*",
+    "init",
+    "libc6*",
+    "glibc*",
+    "base-files",
+    "filesystem",
+    "bash",
+    "coreutils",
+    "sudo",
+    "polkit*",
+    "policykit*",
+    "dbus*",
+    "grub*",
+    "apt",
+    "dpkg",
+    "rpm",
+    "dnf*",
+    "zypper",
+    "pacman",
+    "snapd",
+    "flatpak",
+    "openssh*",
+    "network-manager*",
+    "NetworkManager*",
+    // Le bureau lui-même et l'écran de connexion.
+    "*-desktop",
+    "*-desktop-minimal",
+    "ubuntu-minimal",
+    "ubuntu-standard",
+    "gnome-shell*",
+    "plasma-desktop",
+    "plasma-workspace",
+    "cinnamon",
+    "gdm*",
+    "sddm*",
+    "lightdm*",
+    "xorg*",
+    "xserver-xorg*",
+    "wayland*",
+    "mesa*",
 ];
 
 /// Exceptions à `PROTEGES` : applis ordinaires dont le nom ressemble à celui
 /// d'un composant du système.
-pub const NON_PROTEGES: &[&str] = &["Microsoft.Windows.Photos"];
+pub const NON_PROTEGES: &[&str] = &["Microsoft.Windows.Photos", "Microsoft.Windows.DevHome"];
 
 pub fn est_protege(nom: &str) -> bool {
     if NON_PROTEGES.iter().any(|m| correspond(m, nom)) {
@@ -113,15 +203,15 @@ pub fn est_protege(nom: &str) -> bool {
 }
 
 pub fn catalogue() -> &'static [Element] {
-    CATALOGUE
+    CATALOGUE_WINDOWS
 }
 
 const fn hkcu(cle: &'static str, nom: &'static str, valeur: u32) -> Action {
-    Action::Registre { ruche: Ruche::Utilisateur, cle, nom, valeur }
+    Action::Registre { ruche: Ruche::Utilisateur, cle, nom, valeur: Valeur::Nombre(valeur) }
 }
 
 const fn hklm(cle: &'static str, nom: &'static str, valeur: u32) -> Action {
-    Action::Registre { ruche: Ruche::Machine, cle, nom, valeur }
+    Action::Registre { ruche: Ruche::Machine, cle, nom, valeur: Valeur::Nombre(valeur) }
 }
 
 const fn appli(
@@ -131,7 +221,7 @@ const fn appli(
     risque: Risque,
     actions: &'static [Action],
 ) -> Element {
-    Element { id, categorie: Categorie::Applis, nom, explication, risque, actions }
+    Element { id, categorie: Categorie::Applis, nom, explication, risque, cible: Cible::Partout, actions }
 }
 
 const fn pub_(
@@ -140,7 +230,7 @@ const fn pub_(
     explication: &'static str,
     actions: &'static [Action],
 ) -> Element {
-    Element { id, categorie: Categorie::Pubs, nom, explication, risque: Risque::SansRisque, actions }
+    Element { id, categorie: Categorie::Pubs, nom, explication, risque: Risque::SansRisque, cible: Cible::Partout, actions }
 }
 
 const fn telemetrie(
@@ -150,7 +240,7 @@ const fn telemetrie(
     risque: Risque,
     actions: &'static [Action],
 ) -> Element {
-    Element { id, categorie: Categorie::Telemetrie, nom, explication, risque, actions }
+    Element { id, categorie: Categorie::Telemetrie, nom, explication, risque, cible: Cible::Partout, actions }
 }
 
 use Action::{OneDrive, Paquet, Service, Tache};
@@ -163,7 +253,7 @@ const COLLECTE: &str = r"SOFTWARE\Policies\Microsoft\Windows\DataCollection";
 const ACTIVITE: &str = r"SOFTWARE\Policies\Microsoft\Windows\System";
 const SAISIE: &str = r"Software\Microsoft\InputPersonalization";
 
-const CATALOGUE: &[Element] = &[
+pub const CATALOGUE_WINDOWS: &[Element] = &[
     // ----- Applis préinstallées -----
     appli(
         "jeux-promo",
@@ -348,7 +438,7 @@ const CATALOGUE: &[Element] = &[
     ),
     appli(
         "groove-films",
-        "Groove Musique et Films et TV",
+        "Lecteur multimédia (Groove) et Films et TV",
         "Lecteurs audio et vidéo de Windows. Sans eux, il faut un autre lecteur (VLC, par exemple).",
         Attention,
         &[Paquet("Microsoft.ZuneMusic"), Paquet("Microsoft.ZuneVideo")],
@@ -435,6 +525,80 @@ const CATALOGUE: &[Element] = &[
             Paquet("*LinkedInforWindows"),
         ],
     ),
+    // Propres à Windows 11.
+    appli(
+        "teams-chat",
+        "Chat Teams (version personnelle)",
+        "La version grand public de Teams, avec son icône « Converser » dans la barre des tâches.",
+        SansRisque,
+        &[
+            Paquet("MicrosoftTeams"),
+            hklm(r"SOFTWARE\Policies\Microsoft\Windows\Windows Chat", "ChatIcon", 3),
+        ],
+    ),
+    appli(
+        "dev-home",
+        "Dev Home",
+        "Tableau de bord pour développeurs, installé d'office.",
+        SansRisque,
+        &[Paquet("Microsoft.Windows.DevHome")],
+    ),
+    appli(
+        "teams",
+        "Microsoft Teams",
+        "À garder si vous vous en servez pour le travail ou l'école.",
+        Attention,
+        &[Paquet("MSTeams")],
+    ),
+    appli(
+        "copilot",
+        "Copilot",
+        "L'assistant IA de Microsoft, sous forme d'appli.",
+        Attention,
+        &[Paquet("Microsoft.Copilot")],
+    ),
+    appli(
+        "clipchamp",
+        "Clipchamp",
+        "Montage vidéo de Microsoft, en partie payant.",
+        Attention,
+        &[Paquet("Clipchamp.Clipchamp")],
+    ),
+    appli(
+        "outlook",
+        "Outlook (nouveau)",
+        "La nouvelle appli de messagerie de Windows. Les comptes qui y sont configurés ne seront plus relevés.",
+        Attention,
+        &[Paquet("Microsoft.OutlookForWindows")],
+    ),
+    appli(
+        "todo",
+        "Microsoft To Do",
+        "Listes de tâches. Elles restent en ligne dans votre compte Microsoft.",
+        Attention,
+        &[Paquet("Microsoft.Todos")],
+    ),
+    appli(
+        "power-automate",
+        "Power Automate",
+        "Outil d'automatisation de tâches.",
+        Attention,
+        &[Paquet("Microsoft.PowerAutomateDesktop")],
+    ),
+    appli(
+        "famille",
+        "Microsoft Family",
+        "À garder si le contrôle parental de Microsoft est utilisé sur ce PC.",
+        Attention,
+        &[Paquet("MicrosoftCorporationII.MicrosoftFamily")],
+    ),
+    appli(
+        "assistance-rapide",
+        "Assistance rapide",
+        "Permet à un proche de prendre la main sur le PC pour vous dépanner.",
+        Attention,
+        &[Paquet("MicrosoftCorporationII.QuickAssist")],
+    ),
     // ----- Pubs et suggestions -----
     pub_(
         "applis-en-douce",
@@ -520,7 +684,8 @@ const CATALOGUE: &[Element] = &[
         "« Actualités et champs d'intérêt » dans la barre des tâches",
         "Retire le bouton météo et actualités à côté de l'horloge.",
         &[hklm(r"SOFTWARE\Policies\Microsoft\Windows\Windows Feeds", "EnableFeeds", 0)],
-    ),
+    )
+    .seulement(Cible::Windows10),
     pub_(
         "reunion-maintenant",
         "Icône « Démarrer une réunion »",
@@ -530,7 +695,35 @@ const CATALOGUE: &[Element] = &[
             "HideSCAMeetNow",
             1,
         )],
+    )
+    .seulement(Cible::Windows10),
+    pub_(
+        "recherche-illustrations",
+        "Illustrations et suggestions dans la recherche",
+        "Retire le dessin du jour et les contenus suggérés de la zone de recherche.",
+        &[hkcu(
+            r"Software\Microsoft\Windows\CurrentVersion\SearchSettings",
+            "IsDynamicSearchBoxEnabled",
+            0,
+        )],
     ),
+    pub_(
+        "widgets",
+        "Widgets de la barre des tâches",
+        "Retire le bouton météo et actualités, et le panneau qui s'ouvre quand la souris passe dessus.",
+        &[hklm(r"SOFTWARE\Policies\Microsoft\Dsh", "AllowNewsAndInterests", 0)],
+    )
+    .seulement(Cible::Windows11),
+    pub_(
+        "recommandations-demarrer",
+        "Conseils et promotions dans le menu Démarrer",
+        "Retire les applis et sites mis en avant dans la partie « Nos recommandations », et les rappels liés au compte Microsoft.",
+        &[
+            hkcu(AVANCE, "Start_IrisRecommendations", 0),
+            hkcu(AVANCE, "Start_AccountNotifications", 0),
+        ],
+    )
+    .seulement(Cible::Windows11),
     // ----- Télémétrie -----
     telemetrie(
         "service-telemetrie",
@@ -631,6 +824,25 @@ const CATALOGUE: &[Element] = &[
         SansRisque,
         &[hkcu(r"Control Panel\International\User Profile", "HttpAcceptLanguageOptOut", 1)],
     ),
+    telemetrie(
+        "recall",
+        "Recall",
+        "Empêche Windows d'enregistrer régulièrement des captures de l'écran pour les analyser. Ne concerne que les PC « Copilot+ ».",
+        SansRisque,
+        &[hklm(r"SOFTWARE\Policies\Microsoft\Windows\WindowsAI", "DisableAIDataAnalysis", 1)],
+    )
+    .seulement(Cible::Windows11),
+    telemetrie(
+        "copilot-windows",
+        "Copilot intégré à Windows",
+        "Désactive le volet Copilot de la barre des tâches, sur les versions de Windows 11 où il fait partie du système.",
+        Attention,
+        &[
+            hkcu(r"Software\Policies\Microsoft\Windows\WindowsCopilot", "TurnOffWindowsCopilot", 1),
+            hklm(r"SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot", "TurnOffWindowsCopilot", 1),
+        ],
+    )
+    .seulement(Cible::Windows11),
     telemetrie(
         "cortana-recherche",
         "Cortana dans la recherche",
@@ -808,6 +1020,52 @@ mod tests {
             "spotify",
         ] {
             assert!(!element(id).coche_par_defaut(), "{id} devrait être décoché");
+        }
+    }
+
+    #[test]
+    fn windows_10_et_11_ne_voient_que_leurs_propres_elements() {
+        assert!(Cible::Partout.convient(Some(19045)) && Cible::Partout.convient(None));
+        assert!(Cible::Windows10.convient(Some(19045)) && !Cible::Windows10.convient(Some(22631)));
+        assert!(Cible::Windows11.convient(Some(22000)) && !Cible::Windows11.convient(Some(19045)));
+        assert!(!Cible::Windows11.convient(None) && !Cible::Windows10.convient(None));
+    }
+
+    #[test]
+    fn les_nouveautes_de_windows_11_sont_au_catalogue() {
+        for id in ["widgets", "recommandations-demarrer", "recall", "copilot-windows"] {
+            assert_eq!(element(id).cible, Cible::Windows11, "{id}");
+        }
+        assert!(element("teams-chat").coche_par_defaut());
+        assert!(element("dev-home").coche_par_defaut());
+        for id in ["copilot", "clipchamp", "teams", "outlook", "todo", "power-automate", "famille", "assistance-rapide"] {
+            assert!(!element(id).coche_par_defaut(), "{id} devrait être décoché");
+        }
+    }
+
+    #[test]
+    fn ce_qui_n_existe_que_sous_windows_10_est_marque() {
+        for id in ["actualites-barre", "reunion-maintenant"] {
+            assert_eq!(element(id).cible, Cible::Windows10, "{id}");
+        }
+    }
+
+    #[test]
+    fn dev_home_est_une_appli_ordinaire_malgre_son_nom() {
+        assert!(!est_protege("Microsoft.Windows.DevHome"));
+        assert!(est_protege("MicrosoftWindows.Client.WebExperience"));
+        assert!(est_protege("Microsoft.Windows.Ai.Copilot.Provider"));
+    }
+
+    #[test]
+    fn le_catalogue_windows_n_utilise_que_le_registre_et_des_nombres() {
+        for e in catalogue() {
+            for a in e.actions {
+                if let Action::Registre { ruche, valeur, .. } = a {
+                    assert!(matches!(ruche, Ruche::Utilisateur | Ruche::Machine), "{}", e.id);
+                    assert!(matches!(valeur, Valeur::Nombre(_)), "{}", e.id);
+                }
+            }
         }
     }
 

@@ -42,10 +42,11 @@ fn large(texte: &str) -> Vec<u16> {
     OsStr::new(texte).encode_wide().chain(std::iter::once(0)).collect()
 }
 
-fn racine(ruche: Ruche) -> HKEY {
+fn racine(ruche: Ruche) -> Result<HKEY, String> {
     match ruche {
-        Ruche::Utilisateur => HKEY_CURRENT_USER,
-        Ruche::Machine => HKEY_LOCAL_MACHINE,
+        Ruche::Utilisateur => Ok(HKEY_CURRENT_USER),
+        Ruche::Machine => Ok(HKEY_LOCAL_MACHINE),
+        Ruche::Fichier | Ruche::Gsettings | Ruche::Pro => Err("réglage sans objet sous Windows".to_string()),
     }
 }
 
@@ -73,7 +74,7 @@ impl Cle {
     fn ouvrir(ruche: Ruche, cle: &str, droits: u32) -> Result<Option<Cle>, String> {
         let chemin = large(cle);
         let mut poignee: HKEY = null_mut();
-        let code = unsafe { RegOpenKeyExW(racine(ruche), chemin.as_ptr(), 0, droits, &mut poignee) };
+        let code = unsafe { RegOpenKeyExW(racine(ruche)?, chemin.as_ptr(), 0, droits, &mut poignee) };
         match code {
             ERROR_SUCCESS => Ok(Some(Cle(poignee))),
             code if absent(code) => Ok(None),
@@ -83,10 +84,11 @@ impl Cle {
 
     fn creer(ruche: Ruche, cle: &str) -> Result<Cle, String> {
         let chemin = large(cle);
+        let racine = racine(ruche)?;
         let mut poignee: HKEY = null_mut();
         let code = unsafe {
             RegCreateKeyExW(
-                racine(ruche),
+                racine,
                 chemin.as_ptr(),
                 0,
                 null(),
@@ -148,6 +150,17 @@ impl SystemeWindows {
 }
 
 impl Systeme for SystemeWindows {
+    fn build_windows(&self) -> Option<u32> {
+        let valeur = self
+            .lire_valeur(Ruche::Machine, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion", "CurrentBuildNumber")
+            .ok()??;
+        texte::build_depuis_registre(&valeur.octets)
+    }
+
+    fn reglage_applicable(&self, ruche: Ruche, _cle: &str, _nom: &str) -> bool {
+        matches!(ruche, Ruche::Utilisateur | Ruche::Machine)
+    }
+
     fn lire_valeur(&self, ruche: Ruche, cle: &str, nom: &str) -> Result<Option<ValeurBrute>, String> {
         let Some(ouverte) = Cle::ouvrir(ruche, cle, KEY_QUERY_VALUE)? else {
             return Ok(None);

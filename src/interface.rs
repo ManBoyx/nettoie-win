@@ -3,7 +3,8 @@
 use eframe::egui::{self, Align, Id, Layout, RichText};
 
 use crate::analyse::Ligne;
-use crate::catalogue::{catalogue, Categorie, Risque};
+use crate::analyse::Travail;
+use crate::catalogue::{Categorie, Element, Risque};
 use crate::execution::Resultat;
 use crate::journal::{Annulation, Journal};
 use crate::moteur::{Commande, Message, Moteur};
@@ -14,6 +15,42 @@ const ONGLETS: [(Categorie, &str); 3] = [
     (Categorie::Pubs, "Pubs et suggestions"),
     (Categorie::Telemetrie, "Télémétrie"),
 ];
+
+/// Ce qui change d'un système à l'autre dans la fenêtre.
+#[derive(Clone, Copy)]
+pub struct Profil {
+    pub titre: &'static str,
+    pub catalogue: &'static [Element],
+    /// Créer un point de restauration avant d'appliquer.
+    pub point_de_restauration: bool,
+    /// Comment remettre une appli retirée.
+    pub remise: &'static str,
+    /// Vrai quand le programme tourne sur un faux PC, pour montrer la fenêtre.
+    pub demonstration: bool,
+}
+
+impl Profil {
+    pub const WINDOWS: Profil = Profil {
+        titre: "Nettoie-Win",
+        catalogue: crate::catalogue::CATALOGUE_WINDOWS,
+        point_de_restauration: true,
+        remise: "elles se réinstallent depuis le Microsoft Store",
+        demonstration: false,
+    };
+
+    pub const LINUX: Profil = Profil {
+        titre: "Nettoie-Linux",
+        catalogue: crate::catalogue_linux::CATALOGUE_LINUX,
+        point_de_restauration: false,
+        remise: "elles se réinstallent avec le gestionnaire de paquets",
+        demonstration: false,
+    };
+
+    pub const fn en_demonstration(mut self) -> Profil {
+        self.demonstration = true;
+        self
+    }
+}
 
 /// Un élément proposé et sa case.
 struct Vue {
@@ -41,11 +78,12 @@ enum Dialogue {
 
 pub struct Fenetre {
     moteur: Moteur,
-    demonstration: bool,
+    profil: Profil,
     habillee: bool,
     onglet: Categorie,
     vues: Vec<Vue>,
     masques: usize,
+    systeme: Option<String>,
     avertissements: Vec<String>,
     annulable: bool,
     occupation: Occupation,
@@ -58,17 +96,18 @@ impl Fenetre {
         sys: Box<dyn Systeme + Send>,
         journal: Journal,
         reveil: Box<dyn Fn() + Send>,
-        demonstration: bool,
+        profil: Profil,
     ) -> Self {
-        let moteur = Moteur::demarrer(sys, journal, catalogue(), reveil);
+        let moteur = Moteur::demarrer(sys, journal, profil.catalogue, reveil);
         moteur.envoyer(Commande::Analyser);
         Fenetre {
             moteur,
-            demonstration,
+            profil,
             habillee: false,
             onglet: Categorie::Applis,
             vues: Vec::new(),
             masques: 0,
+            systeme: None,
             avertissements: Vec::new(),
             annulable: false,
             occupation: Occupation::Analyse,
@@ -126,6 +165,7 @@ impl Fenetre {
                         })
                         .collect();
                     self.masques = analyse.masques;
+                    self.systeme = analyse.systeme;
                     self.avertissements.extend(analyse.avertissements);
                     self.avertissements.dedup();
                     self.annulable = annulable;
@@ -157,18 +197,25 @@ impl Fenetre {
         self.moteur.envoyer(Commande::Appliquer { lignes, avec_point });
     }
 
+    fn sous_titre(&self) -> String {
+        match &self.systeme {
+            Some(systeme) => format!("{systeme} : retire ce qui ne sert à rien"),
+            None => "Retire du système ce qui ne sert à rien".to_string(),
+        }
+    }
+
     fn entete(&mut self, ui: &mut egui::Ui) {
         ui.add_space(10.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Nettoie-Win").size(22.0).strong());
+            ui.label(RichText::new(self.profil.titre).size(22.0).strong());
             ui.add_space(6.0);
-            ui.label(RichText::new("Retire de Windows 10 ce qui ne sert à rien").weak());
+            ui.label(RichText::new(self.sous_titre()).weak());
         });
-        if self.demonstration {
+        if self.profil.demonstration {
             ui.add_space(4.0);
             ui.colored_label(
                 ui.visuals().warn_fg_color,
-                "Démonstration : ce programme ne tourne pas sous Windows, rien n'est modifié.",
+                "Démonstration sur un PC fictif : rien n'est modifié sur cette machine.",
             );
         }
         ui.add_space(8.0);
@@ -325,9 +372,10 @@ impl Fenetre {
                 let lignes = self.choisies();
                 let applis: Vec<&str> = lignes
                     .iter()
-                    .filter(|l| l.element.categorie == Categorie::Applis)
+                    .filter(|l| l.travaux.iter().any(|t| matches!(t, Travail::Paquet(_) | Travail::OneDrive)))
                     .map(|l| l.element.nom)
                     .collect();
+                let profil = self.profil;
                 let (mut confirmer, mut retour) = (false, false);
                 let echappe = modale(ctx, "Appliquer les changements ?", |ui| {
                     ui.label(match lignes.len() {
@@ -335,13 +383,17 @@ impl Fenetre {
                         n => format!("{n} éléments vont être modifiés."),
                     });
                     ui.add_space(6.0);
-                    ui.label("Un point de restauration Windows est créé avant de commencer.");
+                    ui.label(if profil.point_de_restauration {
+                        "Un point de restauration Windows est créé avant de commencer."
+                    } else {
+                        "Chaque retrait est d'abord simulé : s'il devait emporter autre chose, il est refusé."
+                    });
                     if !applis.is_empty() {
                         ui.add_space(6.0);
                         ui.label(format!("Applis retirées : {}.", applis.join(", ")));
                         ui.colored_label(
                             ui.visuals().warn_fg_color,
-                            "« Annuler les changements » ne remet pas les applis : elles se réinstallent depuis le Microsoft Store.",
+                            format!("« Annuler les changements » ne remet pas les applis : {}.", profil.remise),
                         );
                     }
                     ui.add_space(12.0);
@@ -351,7 +403,7 @@ impl Fenetre {
                     });
                 });
                 if confirmer {
-                    self.appliquer(lignes, true);
+                    self.appliquer(lignes, profil.point_de_restauration);
                     Dialogue::Aucun
                 } else if retour || echappe {
                     Dialogue::Aucun
@@ -390,19 +442,25 @@ impl Fenetre {
                 let rates: Vec<&Resultat> = resultats.iter().filter(|r| !r.reussi()).collect();
                 let titre = if rates.is_empty() { "Terminé" } else { "Terminé, avec des erreurs" };
                 let mut fermer = false;
+                let avec_point = self.profil.point_de_restauration;
                 modale(ctx, titre, |ui| {
                     let reussis = resultats.len() - rates.len();
                     ui.label(match reussis {
                         1 => "1 élément traité.".to_string(),
                         n => format!("{n} éléments traités."),
                     });
-                    ui.label(match point {
-                        Some(PointRestauration::Cree) => "Point de restauration créé.",
-                        Some(PointRestauration::DejaRecent) => {
-                            "Windows avait déjà un point de restauration de moins de 24 heures : il sert de filet."
+                    match point {
+                        Some(PointRestauration::Cree) => {
+                            ui.label("Point de restauration créé.");
                         }
-                        None => "Aucun point de restauration n'a été créé.",
-                    });
+                        Some(PointRestauration::DejaRecent) => {
+                            ui.label("Windows avait déjà un point de restauration de moins de 24 heures : il sert de filet.");
+                        }
+                        None if avec_point => {
+                            ui.label("Aucun point de restauration n'a été créé.");
+                        }
+                        None => {}
+                    }
                     if !rates.is_empty() {
                         ui.add_space(8.0);
                         egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
@@ -430,9 +488,9 @@ impl Fenetre {
             Dialogue::ConfirmationAnnulation => {
                 let (mut confirmer, mut retour) = (false, false);
                 let echappe = modale(ctx, "Remettre les réglages comme avant ?", |ui| {
-                    ui.label("Les réglages, services et tâches modifiés par Nettoie-Win retrouvent leur état d'origine.");
+                    ui.label("Les réglages et services modifiés par ce programme retrouvent leur état d'origine.");
                     ui.add_space(6.0);
-                    ui.label("Les applis retirées ne reviennent pas : elles se réinstallent depuis le Microsoft Store.");
+                    ui.label(format!("Les applis retirées ne reviennent pas : {}.", self.profil.remise));
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         confirmer = ui.button("Remettre comme avant").clicked();
@@ -460,7 +518,7 @@ impl Fenetre {
                     });
                     if !bilan.a_reinstaller.is_empty() {
                         ui.add_space(6.0);
-                        ui.label("Applis retirées, à réinstaller depuis le Microsoft Store si vous les voulez :");
+                        ui.label(format!("Applis retirées ({}) :", self.profil.remise));
                         egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
                             ui.label(RichText::new(bilan.a_reinstaller.join(", ")).weak());
                         });

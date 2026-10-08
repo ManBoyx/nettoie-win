@@ -2,19 +2,40 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 use eframe::egui;
-use nettoie_win::interface::Fenetre;
+use nettoie_win::interface::{Fenetre, Profil};
+use nettoie_win::journal::Journal;
 
-const TITRE: &str = "Nettoie-Win";
+#[cfg(windows)]
+const PROFIL: Profil = Profil::WINDOWS;
+#[cfg(not(windows))]
+const PROFIL: Profil = Profil::LINUX;
 
 fn main() {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let demande = |nom: &str| arguments.iter().any(|a| a == nom);
+
+    #[cfg(unix)]
+    {
+        if demande("--assistant") {
+            std::process::exit(sous_linux::assistant());
+        }
+        if demande("--liste") {
+            sous_linux::lister();
+            return;
+        }
+    }
+    // `--demonstration` : ouvre la fenêtre sur un PC fictif, sans rien modifier.
+    let demonstration = demande("--demonstration");
+
     #[cfg(windows)]
-    if !sous_windows::droits_administrateur() {
+    if !demonstration && !sous_windows::droits_administrateur() {
         return;
     }
 
+    let profil = if demonstration { Profil::WINDOWS.en_demonstration() } else { PROFIL };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title(TITRE)
+            .with_title(profil.titre)
             .with_icon(egui::IconData {
                 rgba: include_bytes!("../ressources/icone-64.rgba").to_vec(),
                 width: 64,
@@ -25,13 +46,17 @@ fn main() {
         ..Default::default()
     };
     let lancement = eframe::run_native(
-        TITRE,
+        profil.titre,
         options,
-        Box::new(|creation| {
+        Box::new(move |creation| {
             let ctx = creation.egui_ctx.clone();
-            let reveil = Box::new(move || ctx.request_repaint());
+            let reveil: Box<dyn Fn() + Send> = Box::new(move || ctx.request_repaint());
             #[cfg(windows)]
             sous_windows::police_du_systeme(&creation.egui_ctx);
+            if demonstration {
+                let sys = nettoie_win::faux::FauxSysteme::windows_11_typique();
+                return Ok(Box::new(Fenetre::nouvelle(Box::new(sys), Journal::en_memoire(), reveil, profil)));
+            }
             Ok(Box::new(fenetre(reveil)?))
         }),
     );
@@ -40,40 +65,96 @@ fn main() {
     }
 }
 
-#[cfg(windows)]
-fn fenetre(reveil: Box<dyn Fn() + Send>) -> Result<Fenetre, String> {
-    use nettoie_win::journal::Journal;
-    use nettoie_win::windows::SystemeWindows;
-
-    let sys = SystemeWindows::nouveau()?;
-    let dossier = std::env::var_os("LOCALAPPDATA").ok_or("dossier de données de l'utilisateur introuvable")?;
-    let fichier = std::path::PathBuf::from(dossier).join(TITRE).join("journal.json");
-    let mut avertissement = None;
-    let journal = match Journal::ouvrir(fichier.clone()) {
-        Ok(journal) => journal,
+/// Ouvre le journal des changements. S'il est abîmé, il est mis de côté plutôt qu'écrasé.
+fn ouvrir_journal(fichier: std::path::PathBuf) -> Result<(Journal, Option<String>), String> {
+    match Journal::ouvrir(fichier.clone()) {
+        Ok(journal) => Ok((journal, None)),
         Err(erreur) => {
-            // On met de côté le journal abîmé plutôt que de l'écraser.
             let _ = std::fs::rename(&fichier, fichier.with_file_name("journal-illisible.json"));
-            avertissement = Some(format!(
-                "Le journal des changements précédents est illisible et a été mis de côté ({erreur})."
-            ));
-            Journal::ouvrir(fichier)?
+            let message =
+                format!("Le journal des changements précédents est illisible et a été mis de côté ({erreur}).");
+            Ok((Journal::ouvrir(fichier)?, Some(message)))
         }
-    };
-    let mut fenetre = Fenetre::nouvelle(Box::new(sys), journal, reveil, false);
+    }
+}
+
+fn avec_journal(
+    sys: Box<dyn nettoie_win::systeme::Systeme + Send>,
+    fichier: std::path::PathBuf,
+    reveil: Box<dyn Fn() + Send>,
+) -> Result<Fenetre, String> {
+    let (journal, avertissement) = ouvrir_journal(fichier)?;
+    let mut fenetre = Fenetre::nouvelle(sys, journal, reveil, PROFIL);
     if let Some(message) = avertissement {
         fenetre.avertir(message);
     }
     Ok(fenetre)
 }
 
-/// Hors de Windows, le programme tourne sur un faux PC : cela sert à voir la fenêtre.
-#[cfg(not(windows))]
+#[cfg(windows)]
 fn fenetre(reveil: Box<dyn Fn() + Send>) -> Result<Fenetre, String> {
-    use nettoie_win::faux::FauxSysteme;
-    use nettoie_win::journal::Journal;
+    let sys = nettoie_win::windows::SystemeWindows::nouveau()?;
+    let dossier = std::env::var_os("LOCALAPPDATA").ok_or("dossier de données de l'utilisateur introuvable")?;
+    let fichier = std::path::PathBuf::from(dossier).join("Nettoie-Win").join("journal.json");
+    avec_journal(Box::new(sys), fichier, reveil)
+}
 
-    Ok(Fenetre::nouvelle(Box::new(FauxSysteme::windows_10_typique()), Journal::en_memoire(), reveil, true))
+#[cfg(unix)]
+fn fenetre(reveil: Box<dyn Fn() + Send>) -> Result<Fenetre, String> {
+    let sys = nettoie_win::linux::SystemeLinux::nouveau(PROFIL.catalogue);
+    avec_journal(Box::new(sys), sous_linux::fichier_journal()?, reveil)
+}
+
+#[cfg(unix)]
+mod sous_linux {
+    use nettoie_win::analyse::analyser;
+    use nettoie_win::assistant::servir;
+    use nettoie_win::catalogue_linux::catalogue;
+    use nettoie_win::linux::{est_root, executer_en_root, SystemeLinux};
+    use nettoie_win::systeme::Systeme;
+
+    /// `~/.local/state/nettoie-linux/journal.json`, ou l'équivalent choisi par l'utilisateur.
+    pub fn fichier_journal() -> Result<std::path::PathBuf, String> {
+        let dossier = match std::env::var_os("XDG_STATE_HOME").filter(|d| !d.is_empty()) {
+            Some(dossier) => std::path::PathBuf::from(dossier),
+            None => std::path::PathBuf::from(std::env::var_os("HOME").ok_or("dossier personnel introuvable")?)
+                .join(".local")
+                .join("state"),
+        };
+        Ok(dossier.join("nettoie-linux").join("journal.json"))
+    }
+
+    /// La partie lancée en administrateur par la fenêtre : exécute ses demandes, rien d'autre.
+    pub fn assistant() -> i32 {
+        if !est_root() {
+            eprintln!("L'assistant ne sert qu'à la fenêtre de Nettoie-Linux, qui le lance elle-même en administrateur.");
+            return 1;
+        }
+        servir(std::io::stdin().lock(), std::io::stdout(), catalogue(), &mut |demande| executer_en_root(demande));
+        0
+    }
+
+    /// `--liste` : écrit ce qui serait proposé sur ce PC, sans fenêtre et sans rien modifier.
+    pub fn lister() {
+        let sys = SystemeLinux::nouveau(catalogue());
+        let analyse = analyser(&sys, catalogue());
+        println!("{}", sys.description().unwrap_or_else(|| "Système non reconnu".to_string()));
+        for avertissement in &analyse.avertissements {
+            println!("! {avertissement}");
+        }
+        for ligne in &analyse.lignes {
+            let case = if ligne.element.coche_par_defaut() { "x" } else { " " };
+            println!("[{case}] {}", ligne.element.nom);
+            for travail in &ligne.travaux {
+                println!("      {}", travail.decrire());
+            }
+        }
+        println!(
+            "{} élément(s) proposé(s), {} déjà réglé(s) ou absent(s) de ce PC.",
+            analyse.lignes.len(),
+            analyse.masques
+        );
+    }
 }
 
 #[cfg(windows)]
@@ -102,7 +183,7 @@ mod sous_windows {
 
     pub fn boite(message: &str) {
         let texte = large(OsStr::new(message));
-        let titre = large(OsStr::new(super::TITRE));
+        let titre = large(OsStr::new(super::PROFIL.titre));
         unsafe {
             MessageBoxW(null_mut(), texte.as_ptr(), titre.as_ptr(), MB_OK | MB_ICONERROR);
         }
